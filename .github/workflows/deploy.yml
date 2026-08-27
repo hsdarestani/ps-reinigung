@@ -26,22 +26,36 @@ jobs:
           target: "/tmp/ps-reinigung-release"
           overwrite: true
 
-      - name: Publish and configure nginx
+      - name: Publish and configure nginx + TLS
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.HOST }}
           username: root
           password: ${{ secrets.PASS }}
+          command_timeout: 15m
           script: |
             set -e
-            SITE_DIR="/var/www/ps-reinigung.smarbiz.sbs"
+            DOMAIN="ps-reinigung.smarbiz.sbs"
+            SITE_DIR="/var/www/$DOMAIN"
+
             mkdir -p "$SITE_DIR"
             cp /tmp/ps-reinigung-release/index.html "$SITE_DIR/index.html"
             chmod 755 "$SITE_DIR"
             chmod 644 "$SITE_DIR/index.html"
 
-            if command -v nginx >/dev/null 2>&1; then
-              cat > /etc/nginx/sites-available/ps-reinigung.smarbiz.sbs <<'NGINX'
+            if ! command -v nginx >/dev/null 2>&1; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+            fi
+
+            # Make sure Cloudflare can reach the origin on HTTP and HTTPS.
+            if command -v ufw >/dev/null 2>&1; then
+              ufw allow 80/tcp || true
+              ufw allow 443/tcp || true
+            fi
+
+            # Start with a clean HTTP vhost so Let's Encrypt HTTP-01 can validate.
+            cat > "/etc/nginx/sites-available/$DOMAIN" <<'NGINX'
             server {
                 listen 80;
                 listen [::]:80;
@@ -50,22 +64,73 @@ jobs:
                 root /var/www/ps-reinigung.smarbiz.sbs;
                 index index.html;
 
+                location /.well-known/acme-challenge/ {
+                    root /var/www/ps-reinigung.smarbiz.sbs;
+                    try_files $uri =404;
+                }
+
                 location / {
                     try_files $uri $uri/ /index.html;
                 }
-
-                location ~* \.(css|js|svg|png|jpg|jpeg|webp|ico|woff2?)$ {
-                    expires 7d;
-                    add_header Cache-Control "public, max-age=604800";
-                    try_files $uri =404;
-                }
-              }
+            }
             NGINX
 
-              ln -sfn /etc/nginx/sites-available/ps-reinigung.smarbiz.sbs /etc/nginx/sites-enabled/ps-reinigung.smarbiz.sbs
-              nginx -t
-              systemctl reload nginx
+            ln -sfn "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
+            nginx -t
+            systemctl enable nginx
+            systemctl restart nginx
+
+            # Obtain/refresh a publicly trusted certificate for Cloudflare Full (strict).
+            if ! command -v certbot >/dev/null 2>&1; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
             fi
 
+            if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
+              echo "Let's Encrypt certificate installed."
+            else
+              echo "Let's Encrypt failed; enabling temporary HTTPS origin certificate."
+              mkdir -p /etc/nginx/ssl
+              if [ ! -f "/etc/nginx/ssl/$DOMAIN.crt" ]; then
+                openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+                  -keyout "/etc/nginx/ssl/$DOMAIN.key" \
+                  -out "/etc/nginx/ssl/$DOMAIN.crt" \
+                  -subj "/CN=$DOMAIN"
+              fi
+
+              cat > "/etc/nginx/sites-available/$DOMAIN" <<'NGINX'
+            server {
+                listen 80;
+                listen [::]:80;
+                server_name ps-reinigung.smarbiz.sbs;
+                return 301 https://$host$request_uri;
+            }
+
+            server {
+                listen 443 ssl;
+                listen [::]:443 ssl;
+                server_name ps-reinigung.smarbiz.sbs;
+
+                ssl_certificate /etc/nginx/ssl/ps-reinigung.smarbiz.sbs.crt;
+                ssl_certificate_key /etc/nginx/ssl/ps-reinigung.smarbiz.sbs.key;
+
+                root /var/www/ps-reinigung.smarbiz.sbs;
+                index index.html;
+
+                location / {
+                    try_files $uri $uri/ /index.html;
+                }
+            }
+            NGINX
+            fi
+
+            nginx -t
+            systemctl restart nginx
+
+            echo "---- Origin verification ----"
+            curl -fsS -H "Host: $DOMAIN" http://127.0.0.1/ >/dev/null && echo "HTTP origin OK"
+            curl -kfsS -H "Host: $DOMAIN" https://127.0.0.1/ >/dev/null && echo "HTTPS origin OK"
+            ss -ltn | grep -E ':(80|443) ' || true
+
             rm -rf /tmp/ps-reinigung-release
-            echo "PS Reinigung demo deployed successfully."
+            echo "PS Reinigung demo deployed successfully with origin HTTPS."
