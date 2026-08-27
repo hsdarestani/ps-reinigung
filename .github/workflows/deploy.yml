@@ -48,13 +48,11 @@ jobs:
               DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
             fi
 
-            # Make sure Cloudflare can reach the origin on HTTP and HTTPS.
             if command -v ufw >/dev/null 2>&1; then
               ufw allow 80/tcp || true
               ufw allow 443/tcp || true
             fi
 
-            # Start with a clean HTTP vhost so Let's Encrypt HTTP-01 can validate.
             cat > "/etc/nginx/sites-available/$DOMAIN" <<'NGINX'
             server {
                 listen 80;
@@ -80,7 +78,6 @@ jobs:
             systemctl enable nginx
             systemctl restart nginx
 
-            # Obtain/refresh a publicly trusted certificate for Cloudflare Full (strict).
             if ! command -v certbot >/dev/null 2>&1; then
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
@@ -134,3 +131,19 @@ jobs:
 
             rm -rf /tmp/ps-reinigung-release
             echo "PS Reinigung demo deployed successfully with origin HTTPS."
+
+      - name: Verify public Cloudflare URL
+        run: |
+          set -e
+          for i in {1..12}; do
+            code=$(curl -sS -o /tmp/ps-body.html -w "%{http_code}" --max-time 15 https://ps-reinigung.smarbiz.sbs || true)
+            echo "Public check attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              grep -qi "PS Reinigung" /tmp/ps-body.html
+              echo "Public Cloudflare endpoint OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Public endpoint did not become healthy in time."
+          exit 1
