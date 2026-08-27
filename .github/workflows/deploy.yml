@@ -22,7 +22,7 @@ jobs:
           host: ${{ secrets.HOST }}
           username: root
           password: ${{ secrets.PASS }}
-          source: "index.html"
+          source: "index.html,product-images.js"
           target: "/tmp/ps-reinigung-release"
           overwrite: true
 
@@ -37,11 +37,17 @@ jobs:
             set -e
             DOMAIN="ps-reinigung.smarbiz.sbs"
             SITE_DIR="/var/www/$DOMAIN"
+            VERSION="$(date +%s)"
 
             mkdir -p "$SITE_DIR"
             cp /tmp/ps-reinigung-release/index.html "$SITE_DIR/index.html"
+            cp /tmp/ps-reinigung-release/product-images.js "$SITE_DIR/product-images.js"
+
+            # Load the product-picture enhancement after the shop's original script.
+            sed -i "s#</body>#  <script src=\"/product-images.js?v=$VERSION\"></script>\n</body>#" "$SITE_DIR/index.html"
+
             chmod 755 "$SITE_DIR"
-            chmod 644 "$SITE_DIR/index.html"
+            chmod 644 "$SITE_DIR/index.html" "$SITE_DIR/product-images.js"
 
             if ! command -v nginx >/dev/null 2>&1; then
               apt-get update
@@ -127,10 +133,12 @@ jobs:
             echo "---- Origin verification ----"
             curl -fsS -H "Host: $DOMAIN" http://127.0.0.1/ >/dev/null && echo "HTTP origin OK"
             curl -kfsS -H "Host: $DOMAIN" https://127.0.0.1/ >/dev/null && echo "HTTPS origin OK"
+            curl -kfsS -H "Host: $DOMAIN" https://127.0.0.1/product-images.js | grep -q "product-photo" && echo "Product image script OK"
+            grep -q "product-images.js" "$SITE_DIR/index.html" && echo "Product image script linked"
             ss -ltn | grep -E ':(80|443) ' || true
 
             rm -rf /tmp/ps-reinigung-release
-            echo "PS Reinigung demo deployed successfully with origin HTTPS."
+            echo "PS Reinigung demo deployed successfully with item pictures."
 
       - name: Verify public Cloudflare URL
         run: |
@@ -140,7 +148,10 @@ jobs:
             echo "Public check attempt $i: HTTP $code"
             if [ "$code" = "200" ]; then
               grep -qi "PS Reinigung" /tmp/ps-body.html
-              echo "Public Cloudflare endpoint OK"
+              grep -q "product-images.js" /tmp/ps-body.html
+              curl -fsS --max-time 15 https://ps-reinigung.smarbiz.sbs/product-images.js -o /tmp/product-images.js
+              grep -q "product-photo" /tmp/product-images.js
+              echo "Public Cloudflare endpoint + product pictures OK"
               exit 0
             fi
             sleep 5
