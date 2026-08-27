@@ -1,0 +1,71 @@
+name: Deploy PS Reinigung Demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ps-reinigung-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy demo to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          source: "index.html"
+          target: "/tmp/ps-reinigung-release"
+          overwrite: true
+
+      - name: Publish and configure nginx
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -e
+            SITE_DIR="/var/www/ps-reinigung.smarbiz.sbs"
+            mkdir -p "$SITE_DIR"
+            cp /tmp/ps-reinigung-release/index.html "$SITE_DIR/index.html"
+            chmod 755 "$SITE_DIR"
+            chmod 644 "$SITE_DIR/index.html"
+
+            if command -v nginx >/dev/null 2>&1; then
+              cat > /etc/nginx/sites-available/ps-reinigung.smarbiz.sbs <<'NGINX'
+            server {
+                listen 80;
+                listen [::]:80;
+                server_name ps-reinigung.smarbiz.sbs;
+
+                root /var/www/ps-reinigung.smarbiz.sbs;
+                index index.html;
+
+                location / {
+                    try_files $uri $uri/ /index.html;
+                }
+
+                location ~* \.(css|js|svg|png|jpg|jpeg|webp|ico|woff2?)$ {
+                    expires 7d;
+                    add_header Cache-Control "public, max-age=604800";
+                    try_files $uri =404;
+                }
+              }
+            NGINX
+
+              ln -sfn /etc/nginx/sites-available/ps-reinigung.smarbiz.sbs /etc/nginx/sites-enabled/ps-reinigung.smarbiz.sbs
+              nginx -t
+              systemctl reload nginx
+            fi
+
+            rm -rf /tmp/ps-reinigung-release
+            echo "PS Reinigung demo deployed successfully."
